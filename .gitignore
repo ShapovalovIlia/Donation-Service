@@ -1,0 +1,10 @@
+__pycache__
+.vscode
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.python-version
+.coverage
+.envrc
+venv
+*.egg-info

@@ -1,0 +1,113 @@
+version: "3.9"
+
+networks:
+  contribution.grafana_stack: {}
+  contribution.redis: {}
+
+services:
+  web-api:
+    profiles: ["web-api"]
+    container_name: contribution.web_api
+    hostname: contribution.web_api
+    ports: ["8000:8000"]
+    restart: unless-stopped
+
+    build:
+      context: ./
+      dockerfile: ./Dockerfile
+      target: web-api
+    networks:
+      - contribution.redis
+    environment:
+      - MONGODB_URL=${MONGODB_URL}
+      - REDIS_URL=${REDIS_URL:-contribution.redis}
+      - RABBITMQ_URL=${RABBITMQ_URL}
+    logging:
+      driver: "json-file"
+      options:
+        tag: "{{.Name}}"
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    profiles: ["web_api"]
+    image: redis:7.4
+    container_name: contribution.redis
+    hostname: contribution.redis
+    expose: ["6379"]
+    restart: unless-stopped
+
+    networks:
+      - contribution.redis
+    logging:
+      driver: "json-file"
+      options:
+        tag: "{{.Name}}"
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    profiles: ["grafana-stack"]
+    image: grafana/grafana
+    container_name: contribution.grafana
+    hostname: contribution.grafana
+    expose: ["3000"]
+    ports: ["3000:3000"]
+    restart: unless-stopped
+
+    networks:
+      - contribution.grafana_stack
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./config/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/loki.yaml:rw
+    logging:
+      driver: "json-file"
+      options:
+        tag: "{{.Name}}"
+        max-size: "10m"
+        max-file: "3"
+
+  loki:
+    profiles: ["grafana-stack"]
+    image: grafana/loki:3.1.0
+    container_name: contribution.loki
+    hostname: contribution.loki
+    expose: ["3100"]
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yaml
+
+    networks:
+      - contribution.grafana_stack
+    volumes:
+      - ./config/loki.yaml:/etc/loki/config.yaml:ro
+    logging:
+      driver: "json-file"
+      options:
+        tag: "{{.Name}}"
+        max-size: "10m"
+        max-file: "3"
+
+  promtail:
+    profiles: ["grafana-stack"]
+    image: grafana/promtail:3.1.0
+    container_name: contribution.promtail
+    hostname: contribution.promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/promtail-config.yaml
+
+    depends_on:
+      - loki
+    networks:
+      - contribution.grafana_stack
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./config/promtail.yaml:/etc/promtail/promtail-config.yaml:ro
+    logging:
+      driver: "json-file"
+      options:
+        tag: "{{.Name}}"
+        max-size: "10m"
+        max-file: "3"

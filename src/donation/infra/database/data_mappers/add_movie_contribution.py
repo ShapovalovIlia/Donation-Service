@@ -1,0 +1,165 @@
+from datetime import date, datetime
+from typing import Any, Mapping, Optional
+from decimal import Decimal
+from uuid import UUID
+
+from motor.motor_asyncio import AsyncIOMotorClientSession
+
+from donation.domain import (
+    ContributionStatus,
+    Genre,
+    MPAA,
+    Writing,
+    CrewMembership,
+    AddMovieContributionId,
+    PersonId,
+    RoleId,
+    WriterId,
+    CrewMemberId,
+    UserId,
+    MovieRole,
+    MovieWriter,
+    MovieCrewMember,
+    PhotoUrl,
+    Money,
+    AddMovieContribution,
+)
+from donation.infra.database.collections import (
+    AddMovieContributionCollection,
+)
+from donation.infra.database.identity_maps import (
+    AddMovieContributionMap,
+)
+from donation.infra.database.lock_factory import (
+    MongoDBLockFactory,
+)
+from donation.infra.database.unit_of_work import (
+    MongoDBUnitOfWork,
+)
+
+
+class AddMovieContributionMapper:
+    def __init__(
+        self,
+        contribution_map: AddMovieContributionMap,
+        contribution_collection: AddMovieContributionCollection,
+        lock_factory: MongoDBLockFactory,
+        unit_of_work: MongoDBUnitOfWork,
+        session: AsyncIOMotorClientSession,
+    ):
+        self._contribution_map = contribution_map
+        self._contribution_collection = contribution_collection
+        self._lock_factory = lock_factory
+        self._unit_of_work = unit_of_work
+        self._session = session
+
+    async def acquire_by_id(
+        self,
+        id: AddMovieContributionId,
+    ) -> Optional[AddMovieContribution]:
+        contribution_from_map = self._contribution_map.by_id(id)
+        if contribution_from_map and self._contribution_map.is_acquired(
+            contribution_from_map,
+        ):
+            return contribution_from_map
+
+        document = await self._contribution_collection.find_one_and_update(
+            {"id": id.hex},
+            {"$set": {"lock": self._lock_factory()}},
+            session=self._session,
+        )
+        if document:
+            contribution = self._document_to_contribution(document)
+            self._contribution_map.save_acquired(contribution)
+            self._unit_of_work.register_clean(contribution)
+            return contribution
+
+        return None
+
+    async def save(self, contribution: AddMovieContribution) -> None:
+        self._contribution_map.save(contribution)
+        self._unit_of_work.register_new(contribution)
+
+    async def update(self, contribution: AddMovieContribution) -> None:
+        self._unit_of_work.register_dirty(contribution)
+
+    def _document_to_contribution(
+        self,
+        document: Mapping[str, Any],
+    ) -> AddMovieContribution:
+        if document["status_updated_at"]:
+            status_updated_at = datetime.fromisoformat(
+                document["status_updated_at"],
+            )
+        else:
+            status_updated_at = None
+
+        budget_as_dict = document["budget"]
+        if budget_as_dict:
+            budget = Money(
+                amount=Decimal(budget_as_dict["amount"]),
+                currency=budget_as_dict["currency"],
+            )
+        else:
+            budget = None
+
+        revenue_as_dict = document["revenue"]
+        if revenue_as_dict:
+            revenue = Money(
+                amount=Decimal(revenue_as_dict["amount"]),
+                currency=revenue_as_dict["currency"],
+            )
+        else:
+            revenue = None
+
+        roles = []
+        for role_as_dict in document["roles"]:
+            role = MovieRole(
+                id=RoleId(UUID(role_as_dict["id"])),
+                person_id=PersonId(UUID(role_as_dict["person_id"])),
+                character=document["character"],
+                importance=document["importance"],
+                is_spoiler=document["is_spoiler"],
+            )
+            roles.append(role)
+
+        writers = []
+        for writer_as_dict in document["writers"]:
+            writer = MovieWriter(
+                id=WriterId(UUID(writer_as_dict["id"])),
+                person_id=PersonId(UUID(writer_as_dict["person_id"])),
+                writing=Writing(writer_as_dict["writing"]),
+            )
+            writers.append(writer)
+
+        crew = []
+        for crew_member_as_dict in document["crew"]:
+            crew_member = MovieCrewMember(
+                id=CrewMemberId(UUID(crew_member_as_dict["id"])),
+                person_id=PersonId(UUID(crew_member_as_dict["person_id"])),
+                membership=CrewMembership(crew_member_as_dict["membership"]),
+            )
+            crew.append(crew_member)
+
+        return AddMovieContribution(
+            status=ContributionStatus(document["status"]),
+            created_at=datetime.fromisoformat(document["created_at"]),
+            status_updated_at=status_updated_at,
+            id=AddMovieContributionId(UUID(document["id"])),
+            author_id=UserId(UUID(document["author_id"])),
+            eng_title=document["eng_title"],
+            original_title=document["original_title"],
+            summary=document["summary"],
+            description=document["description"],
+            release_date=date.fromisoformat(document["release_date"]),
+            countries=document["countries"],
+            genres=[Genre(genre) for genre in document["genres"]],
+            mpaa=MPAA(document["mpaa"]),
+            duration=document["duration"],
+            budget=budget,
+            revenue=revenue,
+            roles=roles,
+            writers=writers,
+            crew=crew,
+            photos=[PhotoUrl(photo_url) for photo_url in document["photos"]],
+        )
